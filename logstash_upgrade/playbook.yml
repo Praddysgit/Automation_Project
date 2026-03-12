@@ -89,10 +89,10 @@
 
     - name: Display Logstash Active State
       debug:
-        msg: "Logstash service is {{ logstash_status.status.ActiveState }}"
+        msg: "Logstash service is {{ service_status.status.ActiveState }}"
 
     - name: Get logs on failure
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
+      when: service_status.status.ActiveState != "active"   
 
-      when: logstash_status.status.ActiveState != "active"   
