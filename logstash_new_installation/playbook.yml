@@ -55,7 +55,7 @@
       dnf:
         name: "{{ logstash_rpm.files[0].path }}"
         state: present
-        disable_gpg_check: no
+        disable_gpg_check: yes
 
     - name: Ensure config directory exists
       file:
@@ -131,3 +131,4 @@
       register: logstash_logs
 
       when: logstash_status.status.ActiveState != "active"          
+
