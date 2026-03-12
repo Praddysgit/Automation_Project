@@ -67,6 +67,8 @@
         group: logstash
         mode: '0644'
       loop: "{{ config_files.files }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Verify Logstash plugins
       command: /usr/share/logstash/bin/logstash-plugin list
@@ -95,5 +97,6 @@
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
       when: service_status.status.ActiveState != "active"   
+
 
 
