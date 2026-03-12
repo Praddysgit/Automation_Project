@@ -1,0 +1,97 @@
+---
+- name: Upgrade Logstash using RPM (Pull Model)
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars:
+    config_src: "files/conf.d/"
+    config_dest: "/etc/logstash/conf.d/"
+    backup_file: "/tmp/logstash_conf_backup_{{ ansible_date_time.date }}.tar.gz"
+
+  tasks:
+
+    - name: Check current Logstash version
+      command: logstash --version
+      register: logstash_version
+      ignore_errors: true
+
+    - name: Display current version
+      debug:
+        var: logstash_version.stdout
+
+    - name: Stop Logstash service
+      systemd:
+        name: logstash
+        state: stopped
+      ignore_errors: true
+
+    - name: Backup existing Logstash configuration
+      archive:
+        path: /etc/logstash/
+        dest: "{{ backup_file }}"
+        format: gz
+
+    - name: Find downloaded Logstash RPM
+      find:
+        paths: /tmp
+        patterns: "logstash-*.rpm"
+      register: logstash_rpm
+
+    - name: Abort if RPM not found
+      fail:
+        msg: "No Logstash RPM found in /tmp. Cannot proceed."
+      when: logstash_rpm.files | length == 0
+
+    - name: Install Logstash RPM
+      dnf:
+        name: "{{ logstash_rpm.files[0].path }}"
+        state: present
+        disable_gpg_check: no
+
+    - name: Find Logstash configuration files (excluding 100.conf and 200.conf)
+      find:
+        paths: "{{ config_src }}"
+        patterns: "*.conf"
+        excludes:
+          - "100-input.conf"
+          - "400-output.conf"
+      register: config_files
+      delegate_to: localhost
+
+    - name: Copy Logstash configuration files
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ config_dest }}{{ item.path | basename }}"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      loop: "{{ config_files.files }}"
+
+    - name: Verify Logstash plugins
+      command: /usr/share/logstash/bin/logstash-plugin list
+      register: plugin_output
+
+    - name: Show installed plugins
+      debug:
+        var: plugin_output.stdout_lines
+
+    - name: Enable and Start Logstash service
+      systemd:
+        name: logstash
+        enabled: yes
+        state: started
+
+    - name: Check Logstash service status
+      systemd:
+        name: logstash
+      register: service_status
+
+    - name: Display Logstash Active State
+      debug:
+        msg: "Logstash service is {{ logstash_status.status.ActiveState }}"
+
+    - name: Get logs on failure
+      command: journalctl -u logstash -n 20 --no-pager
+      register: logstash_logs
+      when: logstash_status.status.ActiveState != "active"   
