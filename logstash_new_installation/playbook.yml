@@ -126,9 +126,12 @@
       debug:
         msg: "Logstash service is {{ logstash_status.status.ActiveState }}"
 
+    - name: Display installed logstash version
+      command: rpm -q logstash
+
     - name: Get logs on failure
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
-
       when: logstash_status.status.ActiveState != "active"          
+
 
