@@ -4,7 +4,7 @@
   become: yes
   gather_facts: yes
   vars:
-    rpm_path: "{{ lookup('fileglob', 'files/logstash-*.rpm', wantlist=True) | first }}"
+    rpm_path: "/tmp/logstash-*.rpm"
     conf_src: "files/conf.d"
     conf_dest: "/etc/logstash/conf.d"
     deployment_type: "{{ deployment_type }}"
@@ -109,3 +109,4 @@
       register: logstash_logs
 
       when: logstash_status.status.ActiveState != "active"          
+
