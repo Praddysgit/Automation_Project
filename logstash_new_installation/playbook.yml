@@ -61,8 +61,8 @@
         paths: "{{ conf_src }}"
         patterns: "*.conf"
         excludes:
-          - "100.conf"
-          - "400.conf"
+          - "100-input.conf"
+          - "400-output.conf"
       register: static_configs
       delegate_to: localhost
 
@@ -77,8 +77,8 @@
 
     - name: Deploy 100.conf with client name replacement
       template:
-        src: "{{ conf_src }}/100.conf.j2"
-        dest: "{{ conf_dest }}/100.conf"
+        src: "{{ conf_src }}/100-input.conf"
+        dest: "{{ conf_dest }}/100-input.conf"
         owner: logstash
         group: logstash
         mode: '0644'
@@ -87,8 +87,8 @@
 
     - name: Deploy 400.conf with namespace and dataset
       template:
-        src: "{{ conf_src }}/400.conf.j2"
-        dest: "{{ conf_dest }}/400.conf"
+        src: "{{ conf_src }}/400-output.conf"
+        dest: "{{ conf_dest }}/400-output.conf"
         owner: logstash
         group: logstash
         mode: '0644'
@@ -120,4 +120,5 @@
       register: logstash_logs
 
       when: logstash_status.status.ActiveState != "active"          
+
 
