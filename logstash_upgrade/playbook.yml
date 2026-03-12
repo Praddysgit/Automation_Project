@@ -12,7 +12,7 @@
   tasks:
 
     - name: Check current Logstash version
-      command: logstash --version
+      command: rpm -q logstash
       register: logstash_version
       ignore_errors: true
 
@@ -95,4 +95,5 @@
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
       when: service_status.status.ActiveState != "active"   
+
 
