@@ -74,6 +74,8 @@
         group: logstash
         mode: '0644'
       loop: "{{ static_configs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
 
     - name: Deploy 100.conf with client name replacement
       template:
@@ -120,5 +122,6 @@
       register: logstash_logs
 
       when: logstash_status.status.ActiveState != "active"          
+
 
 
