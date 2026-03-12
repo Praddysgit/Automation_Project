@@ -12,14 +12,23 @@
 
   tasks:
     - name: Check if Logstash already installed
-      command: which logstash
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/share/logstash
+        - /etc/logstash
+        - /usr/lib/systemd/system/logstash.service
       register: logstash_check
-      ignore_errors: yes
+      loop_control:
+        label: "{{ item }}"
 
     - name: Abort if Logstash already installed
       fail:
-        msg: "Logstash already installed. Aborting deployment."
-      when: logstash_check.rc == 0
+        msg: "Logstash already installed (found {{ item.item }}). Aborting deployment."
+      when: item.stat.exists
+      loop: "{{ logstash_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Set namespace and dataset
       set_fact:
@@ -46,7 +55,7 @@
       dnf:
         name: "{{ logstash_rpm.files[0].path }}"
         state: present
-        disable_gpg_check: yes
+        disable_gpg_check: no
 
     - name: Ensure config directory exists
       file:
@@ -74,8 +83,6 @@
         group: logstash
         mode: '0644'
       loop: "{{ static_configs.files }}"
-      loop_control:
-        label: "{{ item.path | basename }}"
 
     - name: Deploy 100.conf with client name replacement
       template:
@@ -120,8 +127,4 @@
     - name: Get logs on failure
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
-
       when: logstash_status.status.ActiveState != "active"          
-
-
-
