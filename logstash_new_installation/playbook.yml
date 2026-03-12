@@ -83,6 +83,8 @@
         group: logstash
         mode: '0644'
       loop: "{{ static_configs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
 
     - name: Deploy 100.conf with client name replacement
       template:
@@ -127,4 +129,5 @@
     - name: Get logs on failure
       command: journalctl -u logstash -n 20 --no-pager
       register: logstash_logs
+
       when: logstash_status.status.ActiveState != "active"          
