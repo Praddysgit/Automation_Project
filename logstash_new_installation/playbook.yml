@@ -81,7 +81,7 @@
         dest: "{{ conf_dest }}/{{ item.path | basename }}"
         owner: logstash
         group: logstash
-        mode: '0644'
+        mode: '0755'
       loop: "{{ static_configs.files }}"
       loop_control:
         label: "{{ item.path | basename }}"
@@ -92,7 +92,7 @@
         dest: "{{ conf_dest }}/100-input.conf"
         owner: logstash
         group: logstash
-        mode: '0644'
+        mode: '0755'
       vars:
         datacenter_clientname: "{{ client_name }}"
 
@@ -102,7 +102,7 @@
         dest: "{{ conf_dest }}/400-output.conf"
         owner: logstash
         group: logstash
-        mode: '0644'
+        mode: '0755'
       vars:
         data_stream_namespace: "{{ namespace }}"
         data_stream_dataset: "{{ dataset | trim }}"
