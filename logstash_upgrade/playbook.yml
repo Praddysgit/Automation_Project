@@ -86,6 +86,40 @@
       debug:
         var: plugin_output.stdout_lines
 
+    - name: Fix Logstash directory ownership
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: logstash
+        group: logstash
+        state: directory
+        recurse: yes
+      loop:
+        - /usr/share/logstash
+        - /var/lib/logstash
+        - /var/log/logstash
+        - /etc/logstash
+      
+    - name: Ensure correct permissions on /usr/share/logstash
+      ansible.builtin.shell: >
+        chmod -R u+rwX /usr/share/logstash
+      changed_when: true
+
+    - name: Find files in /etc/logstash/conf.d
+      ansible.builtin.find:
+        paths: /etc/logstash/conf.d
+        file_type: file
+      register: logstash_conf_files
+
+    - name: Set correct permissions on Logstash config files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: '0755'
+        state: file
+      loop: "{{ logstash_conf_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      become: yes
+
     - name: Enable and Start Logstash service
       systemd:
         name: logstash
