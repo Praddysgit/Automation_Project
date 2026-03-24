@@ -1,0 +1,221 @@
+---
+- name: Logstash New Deployment
+  hosts: localhost
+  become: yes
+  gather_facts: yes
+  vars:
+    conf_src: "files/conf.d"
+    conf_dest: "/etc/logstash/conf.d"
+    deployment_type: "{{ deployment_type }}"
+    client_name: "{{ client_name }}"
+
+  tasks:
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 1 — Pre-flight checks: abort if Logstash is already installed
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Check if Logstash already installed
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/share/logstash
+        - /etc/logstash
+        - /lib/systemd/system/logstash.service     # Ubuntu systemd unit path
+                                                   # (RHEL uses /usr/lib/systemd/system/)
+      register: logstash_check
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Abort if Logstash already installed
+      fail:
+        msg: "Logstash already installed (found {{ item.item }}). Aborting deployment."
+      when: item.stat.exists
+      loop: "{{ logstash_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 2 — Resolve namespace and dataset from deployment inputs
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Set namespace and dataset
+      set_fact:
+        namespace: "{{ client_name }}"
+        dataset: >-
+          {% if deployment_type == 'ITOC' %}itoc
+          {% elif deployment_type == 'CLIENT' %}client
+          {% elif deployment_type == 'SMB' %}smb
+          {% else %}unknown
+          {% endif %}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 3 — Locate and install the Logstash .deb package
+    #           Ubuntu uses .deb (apt/dpkg) — NOT .rpm (dnf)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Find downloaded Logstash .deb package in /tmp
+      find:
+        paths: /tmp
+        patterns: "logstash-*.deb"         # .deb for Ubuntu (was .rpm for RHEL)
+      register: logstash_deb
+
+    - name: Abort if .deb not found
+      fail:
+        msg: >
+          No Logstash .deb package found in /tmp. 
+          Run the pre-requisites script first to download the package.
+      when: logstash_deb.files | length == 0
+
+    - name: Install Logstash .deb via apt
+      apt:                                 # 'apt' module replaces 'dnf' module
+        deb: "{{ logstash_deb.files[0].path }}"
+        state: present
+      # NOTE: apt module handles GPG verification automatically via the
+      # keyring configured during pre-reqs (/usr/share/keyrings/elastic-keyring.gpg).
+      # The 'disable_gpg_check' option from dnf is not needed here.
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 4 — Deploy configuration files
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Ensure config directory exists
+      file:
+        path: "{{ conf_dest }}"
+        state: directory
+        owner: logstash
+        group: logstash
+        mode: '0755'
+
+    - name: Find all static config files (excluding input and output templates)
+      find:
+        paths: "{{ conf_src }}"
+        patterns: "*.conf"
+        excludes:
+          - "100-input.conf"
+          - "400-output.conf"
+      register: static_configs
+      delegate_to: localhost
+
+    - name: Copy static config files
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ conf_dest }}/{{ item.path | basename }}"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      loop: "{{ static_configs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Deploy 100-input.conf with client name substitution
+      template:
+        src: "{{ conf_src }}/100-input.conf"
+        dest: "{{ conf_dest }}/100-input.conf"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      vars:
+        datacenter_clientname: "{{ client_name }}"
+
+    - name: Deploy 400-output.conf with namespace and dataset substitution
+      template:
+        src: "{{ conf_src }}/400-output.conf"
+        dest: "{{ conf_dest }}/400-output.conf"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      vars:
+        data_stream_namespace: "{{ namespace }}"
+        data_stream_dataset: "{{ dataset | trim }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 5 — Validate Logstash configuration before starting the service
+    #           Added for Ubuntu — catches config errors before first start
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Validate Logstash configuration
+      command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ conf_dest }}/
+      register: config_validation
+      changed_when: false
+      failed_when: config_validation.rc != 0
+
+    - name: Display config validation result
+      debug:
+        msg: "{{ config_validation.stdout_lines }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 6 — Enable and start the Logstash service
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Reload systemd daemon
+      # Required on Ubuntu after installing a new .deb that ships a systemd unit
+      # Equivalent of: sudo systemctl daemon-reload
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable Logstash service
+      systemd:
+        name: logstash
+        enabled: yes
+
+    - name: Start Logstash service
+      systemd:
+        name: logstash
+        state: started
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 7 — Post-start health check and diagnostics
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Wait for Logstash to initialise (up to 60 seconds)
+      # Logstash JVM startup takes longer than systemd 'started' state implies.
+      # Polling the API port confirms the process is fully ready.
+      wait_for:
+        port: 9600
+        host: 127.0.0.1
+        delay: 10
+        timeout: 60
+      register: logstash_ready
+      ignore_errors: yes
+
+    - name: Check Logstash service status
+      systemd:
+        name: logstash
+      register: logstash_status
+
+    - name: Display Logstash active state
+      debug:
+        msg: "Logstash service is {{ logstash_status.status.ActiveState }}"
+
+    - name: Fetch Logstash node info from API (confirms JVM is up)
+      uri:
+        url: "http://127.0.0.1:9600/"
+        method: GET
+        return_content: yes
+        status_code: 200
+      register: logstash_api
+      ignore_errors: yes
+      when: logstash_ready is not failed
+
+    - name: Display Logstash API response
+      debug:
+        msg: "{{ logstash_api.json | default('API not reachable yet') }}"
+      when: logstash_ready is not failed
+
+    - name: Get recent logs on failure
+      command: journalctl -u logstash -n 30 --no-pager
+      register: logstash_logs
+      when: logstash_status.status.ActiveState != "active"
+
+    - name: Display logs on failure
+      debug:
+        msg: "{{ logstash_logs.stdout_lines }}"
+      when: logstash_status.status.ActiveState != "active"
+
+    - name: Abort with message if service did not start
+      fail:
+        msg: >
+          Logstash service failed to reach 'active' state.
+          Check logs above or run: journalctl -u logstash -n 50 --no-pager
+      when: logstash_status.status.ActiveState != "active"
