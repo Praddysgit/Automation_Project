@@ -185,7 +185,11 @@
     # ─────────────────────────────────────────────────────────────────────────
 
     - name: Validate Logstash configuration
-      command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ config_dest }}
+      command: /usr/share/logstash/bin/logstash --path.settings /etc/logstash --config.test_and_exit -f {{ config_dest }}
+      become: yes
+      become_user: logstash
+      environment:
+        LS_SETTINGS_DIR: /etc/logstash
       register: config_validation
       changed_when: false
       failed_when: config_validation.rc != 0
