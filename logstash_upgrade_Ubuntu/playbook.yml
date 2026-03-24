@@ -1,0 +1,259 @@
+---
+- name: Upgrade Logstash using .deb (Pull Model — Ubuntu)
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars:
+    config_src: "files/conf.d/"
+    config_dest: "/etc/logstash/conf.d/"
+    backup_file: "/tmp/logstash_conf_backup_{{ ansible_date_time.date }}.tar.gz"
+
+  tasks:
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 1 — Pre-upgrade version capture
+    #           Ubuntu uses dpkg to query installed package versions,
+    #           not rpm -q as on RHEL
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Check current Logstash version
+      command: dpkg -l logstash          # dpkg replaces: rpm -q logstash
+      register: logstash_version
+      ignore_errors: true
+
+    - name: Display current version
+      debug:
+        var: logstash_version.stdout
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 2 — Stop service and back up configuration
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Stop Logstash service
+      systemd:
+        name: logstash
+        state: stopped
+      ignore_errors: true
+
+    - name: Backup existing Logstash configuration
+      archive:
+        path: /etc/logstash/
+        dest: "{{ backup_file }}"
+        format: gz
+
+    - name: Confirm backup was created
+      stat:
+        path: "{{ backup_file }}"
+      register: backup_stat
+
+    - name: Abort if backup failed
+      fail:
+        msg: "Configuration backup was not created at {{ backup_file }}. Aborting upgrade."
+      when: not backup_stat.stat.exists
+
+    - name: Display backup location
+      debug:
+        msg: "Configuration backed up to: {{ backup_file }} ({{ backup_stat.stat.size | filesizeformat }})"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 3 — Locate and install the new Logstash .deb package
+    #           Ubuntu uses apt module with deb: parameter — NOT dnf
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Find downloaded Logstash .deb in /tmp
+      find:
+        paths: /tmp
+        patterns: "logstash-*.deb"        # .deb for Ubuntu (was .rpm for RHEL)
+      register: logstash_deb
+
+    - name: Abort if .deb not found
+      fail:
+        msg: >
+          No Logstash .deb package found in /tmp. 
+          Run the pre-requisites script to download the package before upgrading.
+      when: logstash_deb.files | length == 0
+
+    - name: Install Logstash .deb via apt
+      apt:                                # 'apt' module replaces 'dnf' module
+        deb: "{{ logstash_deb.files[0].path }}"
+        state: present
+      # NOTE: Unlike the dnf task on RHEL, apt does not need disable_gpg_check.
+      # GPG verification is handled automatically via the Elastic keyring
+      # installed during pre-reqs (/usr/share/keyrings/elastic-keyring.gpg).
+
+    - name: Reload systemd daemon after .deb install
+      # Required on Ubuntu after installing/upgrading a package that ships
+      # a systemd unit — ensures systemd picks up any unit file changes.
+      systemd:
+        daemon_reload: yes
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 4 — Confirm upgraded version
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Confirm upgraded Logstash version
+      command: dpkg -l logstash          # dpkg replaces: rpm -q logstash
+      register: logstash_new_version
+      ignore_errors: true
+
+    - name: Display upgraded version
+      debug:
+        var: logstash_new_version.stdout
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 5 — Deploy updated configuration files
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Find Logstash configuration files (excluding input and output templates)
+      find:
+        paths: "{{ config_src }}"
+        patterns: "*.conf"
+        excludes:
+          - "100-input.conf"
+          - "400-output.conf"
+      register: config_files
+      delegate_to: localhost
+
+    - name: Copy Logstash configuration files
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ config_dest }}{{ item.path | basename }}"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      loop: "{{ config_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 6 — Fix ownership and permissions
+    #           Same logic as RHEL but with Ubuntu-specific path additions.
+    #           /usr/lib/logstash is included as Ubuntu .deb may install
+    #           some components there in addition to /usr/share/logstash
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Fix Logstash directory ownership
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: logstash
+        group: logstash
+        state: directory
+        recurse: yes
+      loop:
+        - /usr/share/logstash
+        - /var/lib/logstash
+        - /var/log/logstash
+        - /etc/logstash
+
+    - name: Ensure correct permissions on /usr/share/logstash
+      ansible.builtin.shell: >
+        chmod -R u+rwX /usr/share/logstash
+      changed_when: true
+
+    - name: Find files in /etc/logstash/conf.d
+      ansible.builtin.find:
+        paths: /etc/logstash/conf.d
+        file_type: file
+      register: logstash_conf_files
+
+    - name: Set correct permissions on Logstash config files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: '0644'
+        state: file
+      loop: "{{ logstash_conf_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      become: yes
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 7 — Verify plugins post-upgrade
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Verify Logstash plugins
+      command: /usr/share/logstash/bin/logstash-plugin list
+      register: plugin_output
+
+    - name: Show installed plugins
+      debug:
+        var: plugin_output.stdout_lines
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 8 — Validate configuration before starting the service
+    #           Added for Ubuntu — catches pipeline errors before restart
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Validate Logstash configuration
+      command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ config_dest }}
+      register: config_validation
+      changed_when: false
+      failed_when: config_validation.rc != 0
+
+    - name: Display config validation result
+      debug:
+        msg: "{{ config_validation.stdout_lines }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 9 — Enable, start and verify the service
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Enable and start Logstash service
+      systemd:
+        name: logstash
+        enabled: yes
+        state: started
+
+    - name: Wait for Logstash to initialise (up to 60 seconds)
+      # Logstash JVM startup takes longer than systemd 'started' implies.
+      # Polling port 9600 confirms the process is fully ready.
+      wait_for:
+        port: 9600
+        host: 127.0.0.1
+        delay: 10
+        timeout: 60
+      register: logstash_ready
+      ignore_errors: yes
+
+    - name: Check Logstash service status
+      systemd:
+        name: logstash
+      register: service_status
+
+    - name: Display Logstash active state
+      debug:
+        msg: "Logstash service is {{ service_status.status.ActiveState }}"
+
+    - name: Fetch Logstash node info from API (confirms JVM is up)
+      uri:
+        url: "http://127.0.0.1:9600/"
+        method: GET
+        return_content: yes
+        status_code: 200
+      register: logstash_api
+      ignore_errors: yes
+      when: logstash_ready is not failed
+
+    - name: Display Logstash API response
+      debug:
+        msg: "{{ logstash_api.json | default('API not reachable yet') }}"
+      when: logstash_ready is not failed
+
+    - name: Get recent logs on failure
+      command: journalctl -u logstash -n 30 --no-pager
+      register: logstash_logs
+      when: service_status.status.ActiveState != "active"
+
+    - name: Display logs on failure
+      debug:
+        msg: "{{ logstash_logs.stdout_lines }}"
+      when: service_status.status.ActiveState != "active"
+
+    - name: Abort with message if service did not start
+      fail:
+        msg: >
+          Logstash service failed to reach 'active' state after upgrade.
+          Backup is available at: {{ backup_file }}
+          To rollback: sudo dpkg -i <previous_logstash_version>.deb
+          Check logs above or run: journalctl -u logstash -n 50 --no-pager
+      when: service_status.status.ActiveState != "active"
