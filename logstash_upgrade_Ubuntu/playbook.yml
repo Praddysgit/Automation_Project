@@ -18,7 +18,7 @@
     # ─────────────────────────────────────────────────────────────────────────
 
     - name: Check current Logstash version
-      command: dpkg -l logstash          # dpkg replaces: rpm -q logstash
+      command: dpkg-query -W -f='${Version}\n' logstash | cut -d: -f2 | cut -d- -f1          # dpkg replaces: rpm -q logstash
       register: logstash_version
       ignore_errors: true
 
