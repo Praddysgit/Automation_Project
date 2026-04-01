@@ -141,6 +141,17 @@
         group: logstash
         recurse: yes
 
+    - name: Fix ownership of Logstash directories
+      file:
+        path: "{{ item }}"
+        owner: logstash
+        group: logstash
+        recurse: yes
+      loop:
+        - /usr/share/logstash
+        - /var/lib/logstash
+        - /var/log/logstash
+
     - name: Validate Logstash configuration
       command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ conf_dest }}/ --path.settings /etc/logstash
       register: config_validation
