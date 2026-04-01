@@ -68,7 +68,10 @@
       when: logstash_deb.files | length == 0
 
     - name: Install Logstash using dpkg (offline)
-      command: dpkg -i "{{ logstash_deb.files[0].path }}"
+      command: > 
+        dpkg -i --force-confnew --force-confdef "{{ logstash_deb.files[0].path }}"
+      environment:
+        DEBIAN_FRONTEND: noninteractive
       register: dpkg_result
       # NOTE: apt module handles GPG verification automatically via the
       # keyring configured during pre-reqs (/usr/share/keyrings/elastic-keyring.gpg).
