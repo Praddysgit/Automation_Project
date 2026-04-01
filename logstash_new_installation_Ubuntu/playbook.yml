@@ -134,11 +134,22 @@
     #           Added for Ubuntu — catches config errors before first start
     # ─────────────────────────────────────────────────────────────────────────
 
+    - name: Ensure proper ownership
+      file:
+        path: "{{ conf_dest }}"
+        owner: logstash
+        group: logstash
+        recurse: yes
+
     - name: Validate Logstash configuration
-      command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ conf_dest }}/
+      command: /usr/share/logstash/bin/logstash --config.test_and_exit -f {{ conf_dest }}/ --path.settings /etc/logstash
       register: config_validation
       changed_when: false
       failed_when: config_validation.rc != 0
+      become: yes
+      become_user: logstash
+      environment:
+        LS_SETTINGS_DIR: /etc/logstash
 
     - name: Display config validation result
       debug:
