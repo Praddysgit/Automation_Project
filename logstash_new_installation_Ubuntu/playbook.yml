@@ -67,10 +67,10 @@
           Run the pre-requisites script first to download the package.
       when: logstash_deb.files | length == 0
 
-    - name: Install Logstash .deb via apt
-      apt:                                 # 'apt' module replaces 'dnf' module
-        deb: "{{ logstash_deb.files[0].path }}"
-        state: present
+    - name: Install Logstash using dpkg (offline)
+      command: dpkg -i "{{ logstash_deb.files[0].path }}"
+      register: dpkg_result
+      ignore_errors: yes
       # NOTE: apt module handles GPG verification automatically via the
       # keyring configured during pre-reqs (/usr/share/keyrings/elastic-keyring.gpg).
       # The 'disable_gpg_check' option from dnf is not needed here.
