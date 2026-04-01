@@ -1,0 +1,366 @@
+---
+- name: Logstash New Deployment
+  hosts: localhost
+  become: yes
+  gather_facts: yes
+  vars:
+    conf_src: "files/conf.d"
+    conf_dest: "/etc/logstash/conf.d"
+    deployment_type: "{{ deployment_type }}"
+    client_name: "{{ client_name }}"
+
+  tasks:
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 1 — Pre-flight checks: abort if Logstash is already installed
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Check if Logstash already installed
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/share/logstash
+        - /etc/logstash
+        - /usr/lib/systemd/system/logstash.service   # dpkg installs here on Ubuntu 24.04
+        - /lib/systemd/system/logstash.service
+      register: logstash_check
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Abort if Logstash already installed
+      fail:
+        msg: "Logstash already installed (found {{ item.item }}). Aborting deployment."
+      when: item.stat.exists
+      loop: "{{ logstash_check.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 2 — Resolve namespace and dataset from deployment inputs
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Set namespace and dataset
+      set_fact:
+        namespace: "{{ client_name }}"
+        dataset: >-
+          {% if deployment_type == 'ITOC' %}itoc
+          {% elif deployment_type == 'CLIENT' %}client
+          {% elif deployment_type == 'SMB' %}smb
+          {% else %}unknown
+          {% endif %}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 3 — Locate and install the Logstash .deb package
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Find downloaded Logstash .deb package in /tmp
+      find:
+        paths: /tmp
+        patterns: "logstash-*.deb"
+      register: logstash_deb
+
+    - name: Abort if .deb not found in /tmp
+      fail:
+        msg: >
+          No Logstash .deb package found in /tmp.
+          Run the pre-requisites script first to download the package.
+      when: logstash_deb.files | length == 0
+
+    - name: Show which .deb will be installed
+      debug:
+        msg: "Installing: {{ logstash_deb.files[0].path }}"
+
+    - name: Install Logstash using dpkg (offline)
+      command: >
+        dpkg -i
+        --force-confnew
+        --force-confdef
+        {{ logstash_deb.files[0].path }}
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: dpkg_result
+      # rc=1 with "end of file on stdin at conffile prompt" means residual
+      # dpkg state from a previous install — purge and retry handles this
+      ignore_errors: yes
+
+    # ── If dpkg fails due to residual conffile state, purge and retry ─────────
+    - name: Check if dpkg failed due to conffile prompt (residual state)
+      set_fact:
+        dpkg_conffile_error: >-
+          {{ 'end of file on stdin at conffile prompt' in (dpkg_result.stderr | default('')) }}
+
+    - name: Purge residual logstash dpkg state and retry install
+      block:
+        - name: Purge residual logstash package state
+          command: dpkg --purge logstash
+          ignore_errors: yes
+
+        - name: Remove any residual config directories left after purge
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /etc/logstash
+            - /var/lib/logstash
+            - /var/log/logstash
+            - /usr/share/logstash
+
+        - name: Reload systemd after purge
+          systemd:
+            daemon_reload: yes
+
+        - name: Retry dpkg install after purge
+          command: >
+            dpkg -i
+            --force-confnew
+            --force-confdef
+            {{ logstash_deb.files[0].path }}
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+          register: dpkg_retry_result
+
+        - name: Abort if dpkg install failed on retry
+          fail:
+            msg: |
+              dpkg install failed even after purging residual state.
+              stdout: {{ dpkg_retry_result.stdout | default('none') }}
+              stderr: {{ dpkg_retry_result.stderr | default('none') }}
+          when: dpkg_retry_result.rc != 0
+
+      when: dpkg_conffile_error | bool
+
+    - name: Abort if initial dpkg install failed (non-conffile error)
+      fail:
+        msg: |
+          dpkg install failed.
+          stdout: {{ dpkg_result.stdout | default('none') }}
+          stderr: {{ dpkg_result.stderr | default('none') }}
+      when:
+        - dpkg_result.rc != 0
+        - not (dpkg_conffile_error | bool)
+
+    # ── Reload systemd so the new unit file is recognised ────────────────────
+    - name: Reload systemd daemon after dpkg install
+      systemd:
+        daemon_reload: yes
+
+    # ── Confirm unit file is present before proceeding ───────────────────────
+    - name: Find logstash systemd unit file (location varies by Ubuntu version)
+      find:
+        paths:
+          - /lib/systemd/system
+          - /usr/lib/systemd/system
+        patterns: "logstash.service"
+      register: logstash_unit_search
+
+    - name: Abort if logstash unit file not found after install
+      fail:
+        msg: >
+          logstash.service unit file not found under /lib/systemd/system or
+          /usr/lib/systemd/system. The dpkg install likely failed silently.
+          dpkg stdout: {{ dpkg_result.stdout | default('none') }}
+      when: logstash_unit_search.matched == 0
+
+    - name: Show found unit file path
+      debug:
+        msg: "Logstash unit file found at: {{ logstash_unit_search.files[0].path }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 4 — Fix ownership BEFORE deploying configs
+    #           Must happen before config deploy so logstash user can read files
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Fix ownership of Logstash directories
+      file:
+        path: "{{ item }}"
+        owner: logstash
+        group: logstash
+        recurse: yes
+        state: directory
+      loop:
+        - /usr/share/logstash
+        - /var/lib/logstash
+        - /var/log/logstash
+        - /etc/logstash
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 5 — Deploy configuration files
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Ensure conf.d directory exists
+      file:
+        path: "{{ conf_dest }}"
+        state: directory
+        owner: logstash
+        group: logstash
+        mode: '0755'
+
+    - name: Find all static config files (excluding input and output templates)
+      find:
+        paths: "{{ conf_src }}"
+        patterns: "*.conf"
+        excludes:
+          - "100-input.conf"
+          - "400-output.conf"
+      register: static_configs
+      delegate_to: localhost
+
+    - name: Copy static config files
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ conf_dest }}/{{ item.path | basename }}"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      loop: "{{ static_configs.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Deploy 100-input.conf with client name substitution
+      template:
+        src: "{{ conf_src }}/100-input.conf"
+        dest: "{{ conf_dest }}/100-input.conf"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      vars:
+        datacenter_clientname: "{{ client_name }}"
+
+    - name: Deploy 400-output.conf with namespace and dataset substitution
+      template:
+        src: "{{ conf_src }}/400-output.conf"
+        dest: "{{ conf_dest }}/400-output.conf"
+        owner: logstash
+        group: logstash
+        mode: '0644'
+      vars:
+        data_stream_namespace: "{{ namespace }}"
+        data_stream_dataset: "{{ dataset | trim }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 6 — Ensure logstash.yml does NOT have test_and_exit set
+    #           This was causing the service to exit immediately after start
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Remove config.test_and_exit from logstash.yml if present
+      lineinfile:
+        path: /etc/logstash/logstash.yml
+        regexp: '^\s*config\.test_and_exit.*'
+        state: absent
+
+    - name: Remove path.config from logstash.yml (let service use conf.d)
+      lineinfile:
+        path: /etc/logstash/logstash.yml
+        regexp: '^\s*path\.config.*'
+        state: absent
+
+    - name: Set path.config in logstash.yml to point at conf.d
+      lineinfile:
+        path: /etc/logstash/logstash.yml
+        line: "path.config: {{ conf_dest }}"
+        regexp: '^\s*path\.config'
+        state: present
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 7 — Validate Logstash configuration before starting the service
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Validate Logstash configuration
+      command: >
+        /usr/share/logstash/bin/logstash
+        --config.test_and_exit
+        -f {{ conf_dest }}/
+        --path.settings /etc/logstash
+      register: config_validation
+      changed_when: false
+      failed_when: config_validation.rc != 0
+      become: yes
+      become_user: logstash
+      environment:
+        LS_SETTINGS_DIR: /etc/logstash
+
+    - name: Display config validation result
+      debug:
+        msg: "{{ config_validation.stdout_lines + config_validation.stderr_lines }}"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 8 — Enable and start the Logstash service
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Enable Logstash service
+      systemd:
+        name: logstash
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start Logstash service
+      systemd:
+        name: logstash
+        state: started
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # BLOCK 9 — Post-start health check
+    #           Logstash JVM takes 60-120 seconds to fully start
+    # ─────────────────────────────────────────────────────────────────────────
+
+    - name: Wait for Logstash to initialise (up to 120 seconds)
+      wait_for:
+        port: 9600
+        host: 127.0.0.1
+        delay: 15
+        timeout: 120
+      register: logstash_ready
+      ignore_errors: yes
+
+    - name: Check Logstash service status
+      systemd:
+        name: logstash
+      register: logstash_status
+
+    - name: Display Logstash active state
+      debug:
+        msg: "Logstash service is {{ logstash_status.status.ActiveState }}"
+
+    - name: Fetch Logstash node info from API (confirms JVM is up)
+      uri:
+        url: "http://127.0.0.1:9600/"
+        method: GET
+        return_content: yes
+        status_code: 200
+      register: logstash_api
+      ignore_errors: yes
+      when: logstash_ready is not failed
+
+    - name: Display Logstash API response
+      debug:
+        msg: "{{ logstash_api.json | default('API not reachable yet') }}"
+      when: logstash_ready is not failed
+
+    # ── On failure: collect all available diagnostic info ────────────────────
+    - name: Collect diagnostics on failure
+      block:
+        - name: Get recent journald logs
+          command: journalctl -u logstash -n 50 --no-pager
+          register: journal_logs
+          ignore_errors: yes
+
+        - name: Get logstash-plain.log tail
+          command: tail -n 50 /var/log/logstash/logstash-plain.log
+          register: plain_logs
+          ignore_errors: yes
+
+        - name: Display journald logs
+          debug:
+            msg: "{{ journal_logs.stdout_lines | default(['no journald logs']) }}"
+
+        - name: Display logstash-plain.log
+          debug:
+            msg: "{{ plain_logs.stdout_lines | default(['log file not found']) }}"
+
+        - name: Abort with message
+          fail:
+            msg: >
+              Logstash service failed to reach 'active' state.
+              Review the log output above or run:
+              sudo tail -f /var/log/logstash/logstash-plain.log
+      when: logstash_status.status.ActiveState != "active"
