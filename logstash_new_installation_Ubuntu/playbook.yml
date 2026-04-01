@@ -70,10 +70,30 @@
     - name: Install Logstash using dpkg (offline)
       command: dpkg -i "{{ logstash_deb.files[0].path }}"
       register: dpkg_result
-      ignore_errors: yes
       # NOTE: apt module handles GPG verification automatically via the
       # keyring configured during pre-reqs (/usr/share/keyrings/elastic-keyring.gpg).
       # The 'disable_gpg_check' option from dnf is not needed here.
+
+    - name: Abort if dpkg install failed
+      fail:
+        msg: "dpkg install failed: {{ dpkg_result.stderr | default('no stderr') }}"
+      when: dpkg_result.rc != 0
+
+    - name: Reload systemd daemon immediately after dpkg install
+      systemd:
+        daemon_reload: yes
+
+    - name: Verify logstash systemd unit file exists
+      stat:
+        path: /lib/systemd/system/logstash.service
+      register: logstash_unit
+
+    - name: Abort if logstash unit file missing after install
+      fail:
+        msg: >
+          logstash.service unit file not found at /lib/systemd/system/logstash.service.
+          The dpkg install may have failed. dpkg output: {{ dpkg_result.stdout | default('none') }}
+      when: not logstash_unit.stat.exists
 
     # ─────────────────────────────────────────────────────────────────────────
     # BLOCK 4 — Deploy configuration files
@@ -169,12 +189,6 @@
     # ─────────────────────────────────────────────────────────────────────────
     # BLOCK 6 — Enable and start the Logstash service
     # ─────────────────────────────────────────────────────────────────────────
-
-    - name: Reload systemd daemon
-      # Required on Ubuntu after installing a new .deb that ships a systemd unit
-      # Equivalent of: sudo systemctl daemon-reload
-      systemd:
-        daemon_reload: yes
 
     - name: Enable Logstash service
       systemd:
